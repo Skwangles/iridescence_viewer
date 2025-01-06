@@ -196,6 +196,31 @@ void viewer::run() {
             viewer->lookat(current_frame_pose.block<3, 1>(0, 3).cast<float>());
         }
 
+        float min_distance = std::numeric_limits<float>::max();
+        unsigned int min_distance_id = 0;
+        Eigen::Matrix4d point_coords;
+        for (const auto& keyfrm : keyfrms) {
+            if (!keyfrm || keyfrm->will_be_erased()) {
+                continue;
+            }
+            auto keyfrms_coords = keyfrm->get_trans_wc();
+            if (clicked_point3d_) {
+                float distance = (keyfrms_coords.cast<float>() - *clicked_point3d_).norm();
+                if (distance < min_distance) {
+                    min_distance = distance;
+                    min_distance_id = keyfrm->id_;
+                    point_coords = keyfrm->get_pose_wc();
+                }
+            }
+        }
+        if (clicked_point3d_) {
+            if (min_distance < std::numeric_limits<float>::max()) {
+                select_keypoint_by_id_ = true;
+                keypoint_id_ = min_distance_id;
+                viewer->lookat(point_coords.block<3, 1>(0, 3).cast<float>());
+            }
+        }
+        
         for (const auto& keyfrm : keyfrms) {
             if (!keyfrm || keyfrm->will_be_erased()) {
                 continue;
@@ -203,7 +228,12 @@ void viewer::run() {
             Eigen::Matrix4d keyfrms_pose = rotate_pose(keyfrm->get_pose_wc(), rot_ros_to_cv_map_frame_);
             const auto name = std::string("keyfrms_pose_") + std::to_string(keyfrm->id_);
             viewer->update_drawable(name, glk::Primitives::wire_frustum(), guik::FlatColor(Eigen::Vector4f(0.0f, 1.0f, 0.0f, 1.0f), keyfrms_pose).scale(keyframe_scale_));
+            if (select_keypoint_by_id_ && keyfrm->id_ == keypoint_id_){
+                viewer->update_drawable(name, glk::Primitives::wire_frustum(), guik::FlatColor(Eigen::Vector4f(0.0f, 1.0f, 0.0f, 1.0f), keyfrms_pose).scale(keyframe_scale_));
+                keypoint_info_ = "Clicked ID:" + std::to_string(keyfrm->id_);
+            }
         }
+
 
         // draw covisibility graph
         if (show_covisibility_graph_) {
@@ -218,54 +248,6 @@ void viewer::run() {
             draw_loop_edge(viewer, keyfrms);
         }
 
-        std::vector<Eigen::Vector3f> points;
-        std::vector<Eigen::Vector3f> normals;
-        float min_distance = std::numeric_limits<float>::max();
-        unsigned int min_distance_id = 0;
-        for (const auto& lm : landmarks) {
-            if (!lm || lm->will_be_erased()) {
-                continue;
-            }
-            const Eigen::Vector3d pos_w = rot_ros_to_cv_map_frame_ * lm->get_pos_in_world();
-            if (select_landmark_by_id_ && landmark_id_ == lm->id_) {
-                viewer->update_drawable("selected point", glk::Primitives::sphere(), guik::FlatColor(Eigen::Vector4f(1.0f, 0.0f, 0.0f, 1.0f)).translate(pos_w).scale(selected_landmark_scale_));
-                landmark_info_ = "num_observed: " + std::to_string(lm->get_num_observed()) + "\nobserved_ratio: " + std::to_string(lm->get_observed_ratio());
-            }
-            if (clicked_point3d_) {
-                float distance = (pos_w.cast<float>() - *clicked_point3d_).norm();
-                if (distance < min_distance) {
-                    min_distance = distance;
-                    min_distance_id = lm->id_;
-                }
-            }
-            points.push_back(pos_w.cast<float>());
-            if (point_splatting_) {
-                normals.push_back((rot_ros_to_cv_map_frame_ * lm->get_obs_mean_normal()).cast<float>());
-            }
-        }
-        if (clicked_point3d_) {
-            if (min_distance < std::numeric_limits<float>::max()) {
-                select_landmark_by_id_ = true;
-                landmark_id_ = min_distance_id;
-            }
-        }
-        auto cloud_buffer = std::make_shared<glk::PointCloudBuffer>(points);
-
-        if (point_splatting_) {
-            cloud_buffer->add_normals(normals);
-
-            // Create a splatting shader
-            auto splatting_shader = glk::create_splatting_shader();
-            // Create a splatting instance
-            auto splatting = std::make_shared<glk::Splatting>(splatting_shader);
-            splatting->set_point_radius(point_radius_);
-            splatting->set_cloud_buffer(cloud_buffer);
-
-            viewer->update_drawable("map", splatting, guik::FlatColor(Eigen::Vector4f(1.0f, 0.5f, 0.0f, 1.0f)));
-        }
-        else {
-            viewer->update_drawable("map", cloud_buffer, guik::FlatColor(Eigen::Vector4f(1.0f, 0.5f, 0.0f, 1.0f)));
-        }
 
         viewer->set_draw_xy_grid(false);
         viewer->update_drawable("coordinate_system", glk::Primitives::coordinate_system(), guik::VertexColor());
@@ -280,18 +262,7 @@ void viewer::run() {
         auto frame_landmarks = keypoints_and_landmarks.second;
         draw_tracked_points(img, keypoints, frame_landmarks, frame_publisher_->get_mapping_is_enabled());
         texture_ = glk::create_texture(img);
-
-        if (select_keypoint_by_id_ && keypoint_id_ < frame_landmarks.size()) {
-            auto lm = frame_landmarks.at(keypoint_id_);
-            if (!lm || lm->will_be_erased()) {
-                continue;
-            }
-            landmark_id_ = lm->id_;
-            const Eigen::Vector3d pos_w = rot_ros_to_cv_map_frame_ * lm->get_pos_in_world();
-            viewer->update_drawable("selected point", glk::Primitives::sphere(), guik::FlatColor(Eigen::Vector4f(1.0f, 0.0f, 0.0f, 1.0f)).translate(pos_w).scale(selected_landmark_scale_));
-            landmark_info_ = "num_observed: " + std::to_string(lm->get_num_observed()) + "\nobserved_ratio: " + std::to_string(lm->get_observed_ratio());
-        }
-
+        
         if (terminate_is_requested()) {
             break;
         }
@@ -326,6 +297,10 @@ unsigned int viewer::draw_tracked_points(
     const bool mapping_is_enabled) {
     unsigned int num_tracked = 0;
 
+    if (keypoints.size() > landmarks.size()){
+        spdlog::warn("Number of keypoints ({}) is greater than landmarks ({})", keypoints.size(), landmarks.size());
+    }
+
     if (show_all_keypoints_) {
         for (unsigned int i = 0; i < keypoints.size(); ++i) {
             if (filter_by_octave_ && octave_ != keypoints.at(i).octave) {
@@ -344,6 +319,10 @@ unsigned int viewer::draw_tracked_points(
     std::vector<std::pair<double, unsigned int>> distance_and_keypoint_idx;
     bool keypoint_exists = false;
     for (unsigned int i = 0; i < keypoints.size(); ++i) {
+        
+        if (i >= landmarks.size()) {
+            continue;
+        }
         const auto& lm = landmarks.at(i);
         if (!lm) {
             continue;
